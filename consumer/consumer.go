@@ -11,7 +11,6 @@ import (
 //Printer consumes stream entries by printing them to stdout
 type Printer struct {
 	Repo domain.EntryRepository
-	Name string
 }
 
 //Consume prints the entry to stdout
@@ -22,7 +21,6 @@ func (p Printer) Consume(e domain.Entry) error {
 		return err
 	}
 
-	fmt.Printf("Consumer %s consumed:\n", p.Name)
 	fmt.Println(string(contents))
 
 	return err
@@ -45,7 +43,7 @@ func (p Printer) StartConsuming() error {
 				continue
 			}
 
-			err = p.Repo.Ack(e)
+			err = p.Repo.Ack(e.ID)
 
 			if err != nil {
 				log.Println(err.Error())

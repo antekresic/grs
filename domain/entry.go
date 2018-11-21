@@ -13,7 +13,7 @@ type Entry struct {
 type EntryRepository interface {
 	AddEntry(Entry) error
 	GetEntries() ([]Entry, error)
-	Ack(Entry) error
+	Ack(ID string) error
 }
 
 //EntryValidator is an interface for validating entries

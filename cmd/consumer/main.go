@@ -6,7 +6,6 @@ import (
 	"github.com/antekresic/grs/consumer"
 	"github.com/antekresic/grs/storage"
 	"github.com/go-redis/redis"
-	"github.com/satori/go.uuid"
 )
 
 func main() {
@@ -20,16 +19,12 @@ func main() {
 		log.Fatal("Redis connection error:", err)
 	}
 
-	name := uuid.NewV4().String()
-
 	r := storage.RedisRepository{
-		Client:       redisClient,
-		ConsumerName: name,
+		Client: redisClient,
 	}
 
 	c := consumer.Printer{
-		Repo: r,
-		Name: name,
+		Repo: &r,
 	}
 
 	log.Fatal(c.StartConsuming())

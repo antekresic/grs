@@ -31,7 +31,7 @@ func main() {
 	}
 
 	s := server.HTTP{
-		Repo:      r,
+		Repo:      &r,
 		Validator: v,
 	}
 

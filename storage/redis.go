@@ -4,33 +4,34 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/antekresic/grs/domain"
 	"github.com/go-redis/redis"
+	uuid "github.com/satori/go.uuid"
 )
 
 const (
-	streamName    string = "eventStream"
-	groupName     string = "consumerGroup"
-	startPosition string = "0"
-	entryField    string = "entry"
+	streamName      string        = "eventStream"
+	cursorHash      string        = "lastPositionCursors"
+	entryField      string        = "entry"
+	readCount       int64         = 10
+	readBlock       time.Duration = 1 * time.Second
+	consumerTimeout time.Duration = 5 * time.Second
 
 	//prefix for "group already exists" error which
 	//can occur when creating a stream group
 	groupExistsAlreadyPrefix string = "BUSYGROUP "
 )
 
-var once sync.Once
-
 //RedisRepository is a Redis implementation of EntryRepository
 type RedisRepository struct {
-	Client       *redis.Client
-	ConsumerName string
+	Client *redis.Client
 
-	groupCreated bool
+	name   string
+	lastID string
 }
 
 //AddEntry stores entry into a Redis Stream
@@ -52,48 +53,37 @@ func (r RedisRepository) AddEntry(e domain.Entry) error {
 	return res.Err()
 }
 
-//CreateStreamGroup creates stream group for consumers
-func (r RedisRepository) CreateStreamGroup() error {
-	//result := r.Client.XGroupCreate(streamName, groupName, startPosition)
-	result := redis.NewStatusCmd("xgroup", "create", streamName, groupName, startPosition, "mkstream")
-	r.Client.Process(result)
+//Ack acknowledges that the entry was processed by the consumer
+func (r RedisRepository) Ack(ID string) error {
+	pipe := r.Client.TxPipeline()
 
-	err := result.Err()
+	pipe.SAdd("consumers", r.name)
+	pipe.Set("lastPosition:"+r.name, ID, time.Duration(0))
+	pipe.Set("heart:"+r.name, 1, consumerTimeout)
 
-	//return error unless its the "group already exists" error
-	if err != nil && !strings.HasPrefix(err.Error(), groupExistsAlreadyPrefix) {
-		return err
-	}
+	_, err := pipe.Exec()
 
-	return nil
-}
-
-//Ack acknowledges that the entry was processed
-func (r RedisRepository) Ack(e domain.Entry) error {
-	return r.Client.XAck(streamName, groupName, e.ID).Err()
+	return err
 }
 
 //GetEntries fetches events from Redis Stream
-func (r RedisRepository) GetEntries() ([]domain.Entry, error) {
-	var err error
-	once.Do(func() {
-		err = r.CreateStreamGroup()
-	})
+func (r *RedisRepository) GetEntries() ([]domain.Entry, error) {
+	if r.name == "" {
+		err := r.identify()
 
-	if err != nil {
-		return nil, err
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	return r.getEntries(r.ConsumerName)
+	return r.getEntries(r.lastID)
 }
 
-func (r RedisRepository) getEntries(consumer string) ([]domain.Entry, error) {
-	streams, err := r.Client.XReadGroup(&redis.XReadGroupArgs{
-		Group:    groupName,
-		Consumer: consumer,
-		Streams:  []string{streamName, ">"},
-		Count:    1,
-		Block:    1 * time.Second,
+func (r *RedisRepository) getEntries(lastID string) ([]domain.Entry, error) {
+	streams, err := r.Client.XRead(&redis.XReadArgs{
+		Streams: []string{streamName, lastID},
+		Count:   readCount,
+		Block:   readBlock,
 	}).Result()
 
 	if err == redis.Nil {
@@ -110,14 +100,22 @@ func (r RedisRepository) getEntries(consumer string) ([]domain.Entry, error) {
 		return nil, errors.New("Stream not found")
 	}
 
-	return getEntries(stream.Messages), nil
+	entries, lastID := getEntries(stream.Messages)
+
+	if lastID != "" {
+		r.lastID = lastID
+	}
+
+	return entries, nil
 }
 
-func getEntries(mm []redis.XMessage) []domain.Entry {
+func getEntries(mm []redis.XMessage) ([]domain.Entry, string) {
 	results := make([]domain.Entry, 0, len(mm))
 	tmpEntry := domain.Entry{}
+	var lastID string
 
 	for _, m := range mm {
+		lastID = m.ID
 		entry, ok := m.Values[entryField]
 
 		if !ok {
@@ -144,7 +142,7 @@ func getEntries(mm []redis.XMessage) []domain.Entry {
 		results = append(results, tmpEntry)
 	}
 
-	return results
+	return results, lastID
 }
 
 func getStreamByName(name string, ss []redis.XStream) *redis.XStream {
@@ -155,4 +153,114 @@ func getStreamByName(name string, ss []redis.XStream) *redis.XStream {
 	}
 
 	return nil
+}
+
+//identify trys to assume the name and position of the consumer which has stopped
+func (r *RedisRepository) identify() error {
+	//fetch last message
+	last, err := r.Client.XRevRangeN(streamName, "+", "-", 1).Result()
+
+	//no last message
+	if err == redis.Nil {
+		r.name, r.lastID = getUniqueName(), "0-0"
+		return nil
+	}
+
+	if err != nil {
+		return err
+	}
+
+	results, err := r.Client.Sort("consumers", &redis.Sort{
+		By: "heart:*",
+		Get: []string{
+			"heart:*",
+			"#",
+			"lastPosition:*",
+		},
+	}).Result()
+
+	if err != nil {
+		return err
+	}
+
+	for {
+		//no consumer history
+		if len(results) < 3 {
+			r.name, r.lastID = getUniqueName(), "0-0"
+			return nil
+		}
+
+		if results[0] != "" {
+			break
+		}
+
+		//skip consumers that are at last stream message
+		if last[0].ID == results[2] {
+			results = results[3:]
+			continue
+		}
+
+		r.name = getUniqueName()
+
+		err := r.stealIdentity(results[1], results[2], r.name)
+
+		//consumer is still alive, skip him
+		if err == redis.TxFailedErr {
+			results = results[3:]
+			continue
+		}
+
+		if err != nil {
+			return err
+		}
+
+		r.lastID = results[2]
+		return nil
+	}
+
+	r.name, r.lastID = getUniqueName(), "0-0"
+	return nil
+}
+
+func getTime(ID string) (time.Time, error) {
+	parts := strings.Split(ID, "-")
+
+	millis, err := strconv.Atoi(parts[0])
+
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	return time.Unix(0, int64(millis)*int64(time.Millisecond)), nil
+}
+
+func (r RedisRepository) stealIdentity(oldConsumerName, ID, newConsumerName string) error {
+	return r.Client.Watch(func(tx *redis.Tx) error {
+		lastPosition, err := tx.Get("lastPosition:" + oldConsumerName).Result()
+		if err != nil {
+			return err
+		}
+
+		//if last position changed, fail the transaction
+		if lastPosition != ID {
+			return redis.TxFailedErr
+		}
+
+		_, err = tx.Pipelined(func(pipe redis.Pipeliner) error {
+			pipe.SRem("consumers", oldConsumerName)
+			pipe.Del("lastPosition:" + oldConsumerName)
+			pipe.SAdd("consumers", newConsumerName)
+			pipe.Set("lastPosition:"+newConsumerName, lastPosition, time.Duration(0))
+			pipe.Set("heart:"+newConsumerName, 1, consumerTimeout)
+			return nil
+
+		})
+
+		return err
+
+	}, "lastPosition:"+oldConsumerName)
+}
+
+func getUniqueName() string {
+	return uuid.NewV4().String()
 }
