@@ -198,7 +198,6 @@ func (r RedisRepository) GetCursors() (cursors []domain.StreamCursor, err error)
 	}
 
 	cursors = make([]domain.StreamCursor, len(results)/3)
-	fmt.Printf("%+v\n", results)
 
 	i := 0
 
