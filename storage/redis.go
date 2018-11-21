@@ -15,18 +15,18 @@ import (
 
 const (
 	streamName      string        = "eventStream"
-	cursorHash      string        = "lastPositionCursors"
+	consumerSet     string        = "consumers"
+	lastPositionKey string        = "lastPosition:"
+	heartKey        string        = "heart:"
 	entryField      string        = "entry"
 	readCount       int64         = 10
 	readBlock       time.Duration = 1 * time.Second
 	consumerTimeout time.Duration = 5 * time.Second
 
-	//prefix for "group already exists" error which
-	//can occur when creating a stream group
-	groupExistsAlreadyPrefix string = "BUSYGROUP "
+	faultyStreamName string = "faultyStream"
 )
 
-//RedisRepository is a Redis implementation of EntryRepository
+//RedisRepository is a Redis implementation of EntryRepository.
 type RedisRepository struct {
 	Client *redis.Client
 
@@ -34,7 +34,7 @@ type RedisRepository struct {
 	lastID string
 }
 
-//AddEntry stores entry into a Redis Stream
+//AddEntry stores entry into a Redis Stream.
 func (r RedisRepository) AddEntry(e domain.Entry) error {
 
 	content, err := json.Marshal(e)
@@ -53,25 +53,25 @@ func (r RedisRepository) AddEntry(e domain.Entry) error {
 	return res.Err()
 }
 
-//Ack acknowledges that the entry was processed by the consumer
+//Ack acknowledges that the entry was processed by the consumer.
 func (r RedisRepository) Ack(ID string) error {
 	//check if ID is over time limit and report it back
 	if isAckOverdue(ID) {
-		log.Printf("Consumer %s finished processing message %s after timeout\n", r.name, ID)
+		log.Printf("Consumer %s finished processing entry %s after timeout\n", r.name, ID)
 	}
 
 	pipe := r.Client.TxPipeline()
 
-	pipe.SAdd("consumers", r.name)
-	pipe.Set("lastPosition:"+r.name, ID, time.Duration(0))
-	pipe.Set("heart:"+r.name, 1, consumerTimeout)
+	pipe.SAdd(consumerSet, r.name)
+	pipe.Set(lastPosition(r.name), ID, time.Duration(0))
+	pipe.Set(heart(r.name), 1, consumerTimeout)
 
 	_, err := pipe.Exec()
 
 	return err
 }
 
-//GetEntries fetches events from Redis Stream
+//GetEntries fetches events from Redis Stream.
 func (r *RedisRepository) GetEntries() ([]domain.Entry, error) {
 	if r.name == "" {
 		err := r.identify()
@@ -105,7 +105,7 @@ func (r *RedisRepository) getEntries(lastID string) ([]domain.Entry, error) {
 		return nil, errors.New("Stream not found")
 	}
 
-	entries, lastID := getEntries(stream.Messages)
+	entries, lastID := r.parseEntries(stream.Messages)
 
 	if lastID != "" {
 		r.lastID = lastID
@@ -114,7 +114,7 @@ func (r *RedisRepository) getEntries(lastID string) ([]domain.Entry, error) {
 	return entries, nil
 }
 
-func getEntries(mm []redis.XMessage) ([]domain.Entry, string) {
+func (r RedisRepository) parseEntries(mm []redis.XMessage) ([]domain.Entry, string) {
 	results := make([]domain.Entry, 0, len(mm))
 	tmpEntry := domain.Entry{}
 	var lastID string
@@ -125,6 +125,7 @@ func getEntries(mm []redis.XMessage) ([]domain.Entry, string) {
 
 		if !ok {
 			log.Printf("Failed getting entry from XMessage for ID: %s", m.ID)
+			r.handleFaultyEntry(m.ID, m.Values)
 			continue
 		}
 
@@ -132,6 +133,7 @@ func getEntries(mm []redis.XMessage) ([]domain.Entry, string) {
 
 		if !ok {
 			log.Printf("Failed converting entry to string from XMessage for ID: %s", m.ID)
+			r.handleFaultyEntry(m.ID, m.Values)
 			continue
 		}
 
@@ -139,6 +141,7 @@ func getEntries(mm []redis.XMessage) ([]domain.Entry, string) {
 
 		if err != nil {
 			log.Printf("Failed unmarshaling entry from XMessage for ID: %s", m.ID)
+			r.handleFaultyEntry(m.ID, m.Values)
 			continue
 		}
 
@@ -148,6 +151,24 @@ func getEntries(mm []redis.XMessage) ([]domain.Entry, string) {
 	}
 
 	return results, lastID
+}
+
+func (r RedisRepository) handleFaultyEntry(ID string, values map[string]interface{}) {
+	pipe := r.Client.TxPipeline()
+
+	//XDel is not in an official version of the library.
+	//There is a PR merged in master that adds the support for this command.
+	//pipe.XDel(streamName, ID)
+	pipe.XAdd(&redis.XAddArgs{
+		Stream: faultyStreamName,
+		Values: values,
+	})
+
+	_, err := pipe.Exec()
+
+	if err != nil {
+		log.Printf("Error handling faulty entry: %s\n", err)
+	}
 }
 
 func getStreamByName(name string, ss []redis.XStream) *redis.XStream {
@@ -160,14 +181,14 @@ func getStreamByName(name string, ss []redis.XStream) *redis.XStream {
 	return nil
 }
 
-//identify trys to assume the name and position of the consumer which has stopped
+//identify trys to assume the name and position of the consumer which has stopped.
 func (r *RedisRepository) identify() error {
-	results, err := r.Client.Sort("consumers", &redis.Sort{
-		By: "lastPosition:*",
+	results, err := r.Client.Sort(consumerSet, &redis.Sort{
+		By: lastPosition("*"),
 		Get: []string{
-			"heart:*",
+			heart("*"),
 			"#",
-			"lastPosition:*",
+			lastPosition("*"),
 		},
 		Alpha: true,
 	}).Result()
@@ -177,12 +198,12 @@ func (r *RedisRepository) identify() error {
 	}
 
 	for {
-		//no (more) consumer details
+		//No (more) consumer details.
 		if len(results) < 3 {
 			break
 		}
 
-		//skip consumer which is still alive
+		//Skip consumer which is still alive.
 		if results[0] != "" {
 			results = results[3:]
 			continue
@@ -191,7 +212,7 @@ func (r *RedisRepository) identify() error {
 		r.name = getUniqueName()
 		err := r.stealIdentity(results[1], results[2], r.name)
 
-		//consumer is still alive, skip him
+		//Consumer is still alive, skip him.
 		if err == redis.TxFailedErr {
 			results = results[3:]
 			continue
@@ -209,33 +230,33 @@ func (r *RedisRepository) identify() error {
 	return nil
 }
 
-//stealIdentity trys to get the identity and last position from an existing consumer
-//returns redis.TxFailedErr if transaction fails which means that the consumer is alive
+//stealIdentity trys to get the identity and last position from an existing consumer.
+//Returns redis.TxFailedErr if transaction fails which means that the consumer is alive.
 func (r RedisRepository) stealIdentity(oldConsumerName, ID, newConsumerName string) error {
 	return r.Client.Watch(func(tx *redis.Tx) error {
-		lastPosition, err := tx.Get("lastPosition:" + oldConsumerName).Result()
+		lastPositionID, err := tx.Get(lastPosition(oldConsumerName)).Result()
 		if err != nil {
 			return err
 		}
 
-		//if last position changed, fail the transaction
-		if lastPosition != ID {
+		//If last position changed, fail the transaction.
+		if lastPositionID != ID {
 			return redis.TxFailedErr
 		}
 
 		_, err = tx.Pipelined(func(pipe redis.Pipeliner) error {
-			pipe.SRem("consumers", oldConsumerName)
-			pipe.Del("lastPosition:" + oldConsumerName)
-			pipe.SAdd("consumers", newConsumerName)
-			pipe.Set("lastPosition:"+newConsumerName, lastPosition, time.Duration(0))
-			pipe.Set("heart:"+newConsumerName, 1, consumerTimeout)
+			pipe.SRem(consumerSet, oldConsumerName)
+			pipe.Del(lastPosition(oldConsumerName))
+			pipe.SAdd(consumerSet, newConsumerName)
+			pipe.Set(lastPosition(newConsumerName), lastPositionID, time.Duration(0))
+			pipe.Set(heart(newConsumerName), 1, consumerTimeout)
 			return nil
 
 		})
 
 		return err
 
-	}, "lastPosition:"+oldConsumerName)
+	}, lastPosition(oldConsumerName))
 }
 
 func isAckOverdue(ID string) bool {
@@ -254,6 +275,14 @@ func isAckOverdue(ID string) bool {
 	)
 
 	return time.Now().Sub(IDTime) > consumerTimeout
+}
+
+func lastPosition(ID string) string {
+	return lastPositionKey + ID
+}
+
+func heart(ID string) string {
+	return heartKey + ID
 }
 
 func getUniqueName() string {
