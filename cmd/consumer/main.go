@@ -5,6 +5,7 @@ import (
 
 	"github.com/antekresic/grs/consumer"
 	"github.com/antekresic/grs/storage"
+	"github.com/antekresic/grs/streamer"
 	"github.com/go-redis/redis"
 )
 
@@ -19,12 +20,14 @@ func main() {
 		log.Fatal("Redis connection error:", err)
 	}
 
-	r := storage.RedisRepository{
-		Client: redisClient,
+	s := &streamer.RedisStreamer{
+		Repo: &storage.RedisRepository{
+			Client: redisClient,
+		},
 	}
 
 	c := consumer.Printer{
-		Repo: &r,
+		Streamer: s,
 	}
 
 	log.Fatal(c.StartConsuming())

@@ -10,7 +10,7 @@ import (
 
 //Printer consumes stream entries by printing them to stdout
 type Printer struct {
-	Repo domain.EntryRepository
+	Streamer domain.EntryStreamer
 }
 
 //Consume prints the entry to stdout
@@ -29,7 +29,7 @@ func (p Printer) Consume(e domain.Entry) error {
 //StartConsuming consumes all the entries it gets from entry repo
 func (p Printer) StartConsuming() error {
 	for {
-		entries, err := p.Repo.GetEntries()
+		entries, err := p.Streamer.GetEntries()
 
 		if err != nil {
 			return err
@@ -43,7 +43,7 @@ func (p Printer) StartConsuming() error {
 				continue
 			}
 
-			err = p.Repo.Ack(e.ID)
+			err = p.Streamer.MarkEntryProcessed(e.ID)
 
 			if err != nil {
 				log.Println(err.Error())

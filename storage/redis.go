@@ -3,27 +3,23 @@ package storage
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/antekresic/grs/domain"
 	"github.com/go-redis/redis"
-	uuid "github.com/satori/go.uuid"
 )
 
 const (
-	streamName      string        = "eventStream"
-	consumerSet     string        = "consumers"
-	lastPositionKey string        = "lastPosition:"
-	heartKey        string        = "heart:"
-	entryField      string        = "entry"
-	readCount       int64         = 10
-	readBlock       time.Duration = 1 * time.Second
-	consumerTimeout time.Duration = 5 * time.Second
-
-	faultyStreamName string = "faultyStream"
+	streamName       string        = "eventStream"
+	consumerSet      string        = "consumers"
+	lastPositionKey  string        = "lastPosition:"
+	heartKey         string        = "heart:"
+	entryField       string        = "entry"
+	readCount        int64         = 10
+	readBlock        time.Duration = 1 * time.Second
+	faultyStreamName string        = "faultyStream"
 )
 
 //RedisClient is an interface to the 3rd party Redis client.
@@ -49,51 +45,42 @@ func (r RedisRepository) AddEntry(e domain.Entry) error {
 	content, err := json.Marshal(e)
 
 	if err != nil {
-		return err
+		return fmt.Errorf("AddEntry: %s", err)
 	}
 
 	m := map[string]interface{}{entryField: content}
 
-	res := r.Client.XAdd(&redis.XAddArgs{
+	err = r.Client.XAdd(&redis.XAddArgs{
 		Stream: streamName,
 		Values: m,
-	})
+	}).Err()
 
-	return res.Err()
-}
-
-//Ack acknowledges that the entry was processed by the consumer.
-func (r RedisRepository) Ack(ID string) error {
-	//check if ID is over time limit and report it back
-	if isAckOverdue(ID) {
-		log.Printf("Consumer %s finished processing entry %s after timeout\n", r.name, ID)
+	if err != nil {
+		return fmt.Errorf("AddEntry: %s", err)
 	}
 
+	return nil
+}
+
+//StoreCursor saves the data necessary to keep track of the streamers last position
+func (r RedisRepository) StoreCursor(cursor domain.StreamCursor) error {
 	pipe := r.Client.TxPipeline()
 
-	pipe.SAdd(consumerSet, r.name)
-	pipe.Set(lastPosition(r.name), ID, time.Duration(0))
-	pipe.Set(heart(r.name), 1, consumerTimeout)
+	pipe.SAdd(consumerSet, cursor.Name)
+	pipe.Set(lastPosition(cursor.Name), cursor.LastID, time.Duration(0))
+	pipe.Set(heart(cursor.Name), 1, time.Duration(cursor.HeartTimeout)*time.Second)
 
 	_, err := pipe.Exec()
 
-	return err
+	if err != nil {
+		return fmt.Errorf("StoreCursor: %s", err)
+	}
+
+	return nil
 }
 
 //GetEntries fetches events from Redis Stream.
-func (r *RedisRepository) GetEntries() ([]domain.Entry, error) {
-	if r.name == "" {
-		err := r.identify()
-
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return r.getEntries(r.lastID)
-}
-
-func (r *RedisRepository) getEntries(lastID string) ([]domain.Entry, error) {
+func (r *RedisRepository) GetEntries(lastID string) (entries []domain.Entry, newLastID string, err error) {
 	streams, err := r.Client.XRead(&redis.XReadArgs{
 		Streams: []string{streamName, lastID},
 		Count:   readCount,
@@ -101,26 +88,22 @@ func (r *RedisRepository) getEntries(lastID string) ([]domain.Entry, error) {
 	}).Result()
 
 	if err == redis.Nil {
-		return nil, nil
+		return nil, "", nil
 	}
 
 	if err != nil {
-		return nil, err
+		return nil, "", fmt.Errorf("GetEntries: %s", err)
 	}
 
 	stream := getStreamByName(streamName, streams)
 
 	if stream == nil {
-		return nil, errors.New("Stream not found")
+		return nil, "", errors.New("GetEntries: Stream not found")
 	}
 
-	entries, lastID := r.parseEntries(stream.Messages)
+	entries, newLastID = r.parseEntries(stream.Messages)
 
-	if lastID != "" {
-		r.lastID = lastID
-	}
-
-	return entries, nil
+	return entries, newLastID, nil
 }
 
 func (r RedisRepository) parseEntries(mm []redis.XMessage) ([]domain.Entry, string) {
@@ -190,8 +173,8 @@ func getStreamByName(name string, ss []redis.XStream) *redis.XStream {
 	return nil
 }
 
-//identify trys to assume the name and position of the consumer which has stopped.
-func (r *RedisRepository) identify() error {
+//GetCursors fetches all the information about cursors from Redis.
+func (r RedisRepository) GetCursors() (cursors []domain.StreamCursor, err error) {
 	results, err := r.Client.Sort(consumerSet, &redis.Sort{
 		By: lastPosition("*"),
 		Get: []string{
@@ -202,88 +185,61 @@ func (r *RedisRepository) identify() error {
 		Alpha: true,
 	}).Result()
 
+	if err == redis.Nil {
+		return []domain.StreamCursor{}, nil
+	}
+
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("GetCursors: %s", err)
 	}
 
-	for {
-		//No (more) consumer details.
-		if len(results) < 3 {
-			break
-		}
-
-		//Skip consumer which is still alive.
-		if results[0] != "" {
-			results = results[3:]
-			continue
-		}
-
-		r.name = getUniqueName()
-		err := r.stealIdentity(results[1], results[2], r.name)
-
-		//Consumer is still alive, skip him.
-		if err == redis.TxFailedErr {
-			results = results[3:]
-			continue
-		}
-
-		if err != nil {
-			return err
-		}
-
-		r.lastID = results[2]
-		return nil
+	if len(results) < 3 {
+		return []domain.StreamCursor{}, nil
 	}
 
-	r.name, r.lastID = getUniqueName(), "$"
-	return nil
+	cursors = make([]domain.StreamCursor, len(results)/3)
+	fmt.Printf("%+v\n", results)
+
+	i := 0
+
+	for len(results) >= 3 {
+		cursors[i].HasHeart = results[0] != ""
+		cursors[i].Name = results[1]
+		cursors[i].LastID = results[2]
+		results = results[3:]
+		i++
+	}
+
+	return cursors, nil
 }
 
-//stealIdentity trys to get the identity and last position from an existing consumer.
+//StealCursor trys to get the identity and last position from an existing consumer.
 //Returns redis.TxFailedErr if transaction fails which means that the consumer is alive.
-func (r RedisRepository) stealIdentity(oldConsumerName, ID, newConsumerName string) error {
+func (r RedisRepository) StealCursor(oldCursor domain.StreamCursor, newConsumerName string) error {
 	return r.Client.Watch(func(tx *redis.Tx) error {
-		lastPositionID, err := tx.Get(lastPosition(oldConsumerName)).Result()
+		lastPositionID, err := tx.Get(lastPosition(oldCursor.Name)).Result()
 		if err != nil {
-			return err
+			return fmt.Errorf("StealCursor: %s", err)
 		}
 
 		//If last position changed, fail the transaction.
-		if lastPositionID != ID {
+		if lastPositionID != oldCursor.LastID {
 			return redis.TxFailedErr
 		}
 
 		_, err = tx.Pipelined(func(pipe redis.Pipeliner) error {
-			pipe.SRem(consumerSet, oldConsumerName)
-			pipe.Del(lastPosition(oldConsumerName))
+			pipe.SRem(consumerSet, oldCursor.Name)
+			pipe.Del(lastPosition(oldCursor.Name))
 			pipe.SAdd(consumerSet, newConsumerName)
 			pipe.Set(lastPosition(newConsumerName), lastPositionID, time.Duration(0))
-			pipe.Set(heart(newConsumerName), 1, consumerTimeout)
+			pipe.Set(heart(newConsumerName), 1, time.Duration(oldCursor.HeartTimeout)*time.Second)
 			return nil
 
 		})
 
 		return err
 
-	}, lastPosition(oldConsumerName))
-}
-
-func isAckOverdue(ID string) bool {
-	parts := strings.Split(ID, "-")
-
-	millis, err := strconv.Atoi(parts[0])
-
-	if err != nil {
-		log.Printf("Error parsing ID to timestamp: %s\n", ID)
-		return false
-	}
-
-	IDTime := time.Unix(
-		0,
-		int64(millis)*int64(time.Millisecond),
-	)
-
-	return time.Now().Sub(IDTime) > consumerTimeout
+	}, lastPosition(oldCursor.Name))
 }
 
 func lastPosition(ID string) string {
@@ -292,8 +248,4 @@ func lastPosition(ID string) string {
 
 func heart(ID string) string {
 	return heartKey + ID
-}
-
-func getUniqueName() string {
-	return uuid.NewV4().String()
 }

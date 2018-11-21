@@ -9,11 +9,27 @@ type Entry struct {
 	Meta       string `json:"meta" validate:"eq=json"`
 }
 
+//StreamCursor holds information about stream consumer last location
+type StreamCursor struct {
+	Name         string
+	LastID       string
+	HeartTimeout int64
+	HasHeart     bool
+}
+
 //EntryRepository is an interface for persisting entries
 type EntryRepository interface {
 	AddEntry(Entry) error
+	GetEntries(lastID string) (entries []Entry, newLastID string, err error)
+	StoreCursor(StreamCursor) error
+	GetCursors() (cursors []StreamCursor, err error)
+	StealCursor(oldCursor StreamCursor, newName string) error
+}
+
+//EntryStreamer streams entries and marks them as processed
+type EntryStreamer interface {
 	GetEntries() ([]Entry, error)
-	Ack(ID string) error
+	MarkEntryProcessed(ID string) error
 }
 
 //EntryValidator is an interface for validating entries
