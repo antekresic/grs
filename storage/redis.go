@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/antekresic/grs/domain"
@@ -157,26 +155,14 @@ func getStreamByName(name string, ss []redis.XStream) *redis.XStream {
 
 //identify trys to assume the name and position of the consumer which has stopped
 func (r *RedisRepository) identify() error {
-	//fetch last message
-	last, err := r.Client.XRevRangeN(streamName, "+", "-", 1).Result()
-
-	//no last message
-	if err == redis.Nil {
-		r.name, r.lastID = getUniqueName(), "0-0"
-		return nil
-	}
-
-	if err != nil {
-		return err
-	}
-
 	results, err := r.Client.Sort("consumers", &redis.Sort{
-		By: "heart:*",
+		By: "lastPosition:*",
 		Get: []string{
 			"heart:*",
 			"#",
 			"lastPosition:*",
 		},
+		Alpha: true,
 	}).Result()
 
 	if err != nil {
@@ -184,24 +170,18 @@ func (r *RedisRepository) identify() error {
 	}
 
 	for {
-		//no consumer history
+		//no (more) consumer details
 		if len(results) < 3 {
-			r.name, r.lastID = getUniqueName(), "0-0"
-			return nil
-		}
-
-		if results[0] != "" {
 			break
 		}
 
-		//skip consumers that are at last stream message
-		if last[0].ID == results[2] {
+		//skip consumer which is still alive
+		if results[0] != "" {
 			results = results[3:]
 			continue
 		}
 
 		r.name = getUniqueName()
-
 		err := r.stealIdentity(results[1], results[2], r.name)
 
 		//consumer is still alive, skip him
@@ -218,22 +198,12 @@ func (r *RedisRepository) identify() error {
 		return nil
 	}
 
-	r.name, r.lastID = getUniqueName(), "0-0"
+	r.name, r.lastID = getUniqueName(), "$"
 	return nil
 }
 
-func getTime(ID string) (time.Time, error) {
-	parts := strings.Split(ID, "-")
-
-	millis, err := strconv.Atoi(parts[0])
-
-	if err != nil {
-		return time.Time{}, err
-	}
-
-	return time.Unix(0, int64(millis)*int64(time.Millisecond)), nil
-}
-
+//stealIdentity trys to get the identity and last position from an existing consumer
+//returns redis.TxFailedErr if transaction fails which means that the consumer is alive
 func (r RedisRepository) stealIdentity(oldConsumerName, ID, newConsumerName string) error {
 	return r.Client.Watch(func(tx *redis.Tx) error {
 		lastPosition, err := tx.Get("lastPosition:" + oldConsumerName).Result()
