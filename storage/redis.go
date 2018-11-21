@@ -26,9 +26,18 @@ const (
 	faultyStreamName string = "faultyStream"
 )
 
+//RedisClient is an interface to the 3rd party Redis client.
+type RedisClient interface {
+	XAdd(*redis.XAddArgs) *redis.StringCmd
+	XRead(*redis.XReadArgs) *redis.XStreamSliceCmd
+	TxPipeline() redis.Pipeliner
+	Sort(set string, sort *redis.Sort) *redis.StringSliceCmd
+	Watch(fn func(*redis.Tx) error, keys ...string) error
+}
+
 //RedisRepository is a Redis implementation of EntryRepository.
 type RedisRepository struct {
-	Client *redis.Client
+	Client RedisClient
 
 	name   string
 	lastID string
