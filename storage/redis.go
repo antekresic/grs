@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/antekresic/grs/domain"
@@ -53,6 +55,11 @@ func (r RedisRepository) AddEntry(e domain.Entry) error {
 
 //Ack acknowledges that the entry was processed by the consumer
 func (r RedisRepository) Ack(ID string) error {
+	//check if ID is over time limit and report it back
+	if isAckOverdue(ID) {
+		log.Printf("Consumer %s finished processing message %s after timeout\n", r.name, ID)
+	}
+
 	pipe := r.Client.TxPipeline()
 
 	pipe.SAdd("consumers", r.name)
@@ -229,6 +236,24 @@ func (r RedisRepository) stealIdentity(oldConsumerName, ID, newConsumerName stri
 		return err
 
 	}, "lastPosition:"+oldConsumerName)
+}
+
+func isAckOverdue(ID string) bool {
+	parts := strings.Split(ID, "-")
+
+	millis, err := strconv.Atoi(parts[0])
+
+	if err != nil {
+		log.Printf("Error parsing ID to timestamp: %s\n", ID)
+		return false
+	}
+
+	IDTime := time.Unix(
+		0,
+		int64(millis)*int64(time.Millisecond),
+	)
+
+	return time.Now().Sub(IDTime) > consumerTimeout
 }
 
 func getUniqueName() string {
