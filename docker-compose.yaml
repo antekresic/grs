@@ -15,7 +15,7 @@ services:
       - "8808:8808"
     links:
       - redis:redis
-    command: ./publisher
+    command: ./publisher --port=8808 --redis-address=redis:6379
 
   consumer:
     build:
@@ -24,4 +24,4 @@ services:
           - command=consumer
     links:
       - redis:redis
-    command: ./consumer
+    command: ./consumer --redis-address=redis:6379

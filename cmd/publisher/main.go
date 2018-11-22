@@ -1,6 +1,8 @@
 package main
 
 import (
+	"flag"
+	"fmt"
 	"log"
 	"net/http"
 
@@ -11,9 +13,16 @@ import (
 	"github.com/go-redis/redis"
 )
 
+var (
+	port      = flag.Int("port", 80, "HTTP port for the service")
+	redisAddr = flag.String("redis-address", ":6379", "Redis address")
+)
+
 func main() {
+	flag.Parse()
+
 	redisClient := redis.NewClient(&redis.Options{
-		Addr: "redis:6379",
+		Addr: *redisAddr,
 	})
 
 	_, err := redisClient.Ping().Result()
@@ -35,5 +44,5 @@ func main() {
 		Validator: v,
 	}
 
-	log.Fatal(http.ListenAndServe(":8808", s))
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), s))
 }

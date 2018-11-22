@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"log"
 
 	"github.com/antekresic/grs/consumer"
@@ -9,9 +10,15 @@ import (
 	"github.com/go-redis/redis"
 )
 
+var (
+	redisAddr = flag.String("redis-address", ":6379", "Redis address")
+)
+
 func main() {
+	flag.Parse()
+
 	redisClient := redis.NewClient(&redis.Options{
-		Addr: "redis:6379",
+		Addr: *redisAddr,
 	})
 
 	_, err := redisClient.Ping().Result()
