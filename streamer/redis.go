@@ -68,8 +68,6 @@ func (r *RedisStreamer) identify() error {
 		return fmt.Errorf("identify: %s", err.Error())
 	}
 
-	fmt.Printf("%+v\n", cursors)
-
 	for _, cursor := range cursors {
 
 		//Skip consumer which is still alive.
