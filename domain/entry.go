@@ -6,7 +6,7 @@ type Entry struct {
 	ObjectID   int    `json:"object_id" validate:"required"`
 	ObjectType int    `json:"object_type" validate:"required"`
 	Action     string `json:"action" validate:"oneof=create update delete"`
-	Meta       string `json:"meta" validate:"eq=json"`
+	Meta       string `json:"meta" validate:"eq=JSON"`
 }
 
 //StreamCursor holds information about stream consumer last location
