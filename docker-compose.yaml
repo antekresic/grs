@@ -24,4 +24,7 @@ services:
           - command=consumer
     links:
       - redis:redis
+    deploy:
+      mode: replicated
+      replicas: 2
     command: ./consumer --redis-address=redis:6379
