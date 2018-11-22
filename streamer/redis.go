@@ -68,6 +68,8 @@ func (r *RedisStreamer) identify() error {
 		return fmt.Errorf("identify: %s", err.Error())
 	}
 
+	fmt.Printf("%+v\n", cursors)
+
 	for _, cursor := range cursors {
 
 		//Skip consumer which is still alive.
@@ -76,7 +78,7 @@ func (r *RedisStreamer) identify() error {
 		}
 
 		r.cursor.Name = getUniqueName()
-		cursor.HeartTimeout = int64(ConsumerTimeout.Seconds())
+		cursor.HeartTimeout = int64(ConsumerTimeout)
 		err := r.Repo.StealCursor(cursor, r.cursor.Name)
 
 		//Consumer is still alive, skip him.

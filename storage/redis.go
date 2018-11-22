@@ -68,7 +68,7 @@ func (r RedisRepository) StoreCursor(cursor domain.StreamCursor) error {
 
 	pipe.SAdd(consumerSet, cursor.Name)
 	pipe.Set(lastPosition(cursor.Name), cursor.LastID, time.Duration(0))
-	pipe.Set(heart(cursor.Name), 1, time.Duration(cursor.HeartTimeout)*time.Second)
+	pipe.Set(heart(cursor.Name), 1, time.Duration(cursor.HeartTimeout))
 
 	_, err := pipe.Exec()
 
@@ -231,7 +231,7 @@ func (r RedisRepository) StealCursor(oldCursor domain.StreamCursor, newConsumerN
 			pipe.Del(lastPosition(oldCursor.Name))
 			pipe.SAdd(consumerSet, newConsumerName)
 			pipe.Set(lastPosition(newConsumerName), lastPositionID, time.Duration(0))
-			pipe.Set(heart(newConsumerName), 1, time.Duration(oldCursor.HeartTimeout)*time.Second)
+			pipe.Set(heart(newConsumerName), 1, time.Duration(oldCursor.HeartTimeout))
 			return nil
 
 		})
