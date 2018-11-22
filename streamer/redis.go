@@ -17,16 +17,30 @@ const (
 	ConsumerTimeout time.Duration = 5 * time.Second
 )
 
+//Clock provides the current time
+type Clock interface {
+	Now() time.Time
+}
+
+//RealClock implements the Clock interface using the time package
+type RealClock struct{}
+
+//Now provides the current time
+func (r RealClock) Now() time.Time {
+	return time.Now()
+}
+
 //RedisStreamer manages the entries stream from Redis
 type RedisStreamer struct {
 	Repo   domain.EntryRepository
+	Clock  Clock
 	cursor domain.StreamCursor
 }
 
 //MarkEntryProcessed stores info about the streamer and last ID processed.
 func (r RedisStreamer) MarkEntryProcessed(ID string) error {
 	//check if ID is over time limit and report it back
-	if isAckOverdue(ID) {
+	if r.isAckOverdue(ID) {
 		log.Printf("Consumer %s finished processing entry %s after timeout\n", r.cursor.Name, ID)
 	}
 
@@ -96,7 +110,7 @@ func (r *RedisStreamer) identify() error {
 	return nil
 }
 
-func isAckOverdue(ID string) bool {
+func (r RedisStreamer) isAckOverdue(ID string) bool {
 	parts := strings.Split(ID, "-")
 
 	millis, err := strconv.Atoi(parts[0])
@@ -111,7 +125,7 @@ func isAckOverdue(ID string) bool {
 		int64(millis)*int64(time.Millisecond),
 	)
 
-	return time.Now().Sub(IDTime) > ConsumerTimeout
+	return r.Clock.Now().Sub(IDTime) > ConsumerTimeout
 }
 
 func getUniqueName() string {

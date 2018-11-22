@@ -31,6 +31,7 @@ func main() {
 		Repo: &storage.RedisRepository{
 			Client: redisClient,
 		},
+		Clock: streamer.RealClock{},
 	}
 
 	c := consumer.Printer{
